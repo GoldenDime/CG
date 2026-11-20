@@ -26,6 +26,7 @@ namespace graphics::internal {
 namespace {
 
 VkInstance vk_instance;
+VkDebugUtilsMessengerEXT vk_debug_messenger;
 uint32_t vk_api_version;
 VkSurfaceKHR vk_surface;
 
@@ -80,18 +81,18 @@ bool initializeImGUI() {
 	const VkDescriptorPoolSize descriptor_pool_sizes[] = {
 		{
 			.type = VK_DESCRIPTOR_TYPE_SAMPLER,
-			.descriptorCount = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE,
+			.descriptorCount = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE + 4,
 		},
 		{
 			.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-			.descriptorCount = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE,
+			.descriptorCount = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE + 16,
 		},
 	};
 
 	const VkDescriptorPoolCreateInfo descriptor_pool = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 		.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-		.maxSets = uint32_t(vk_swapchain_images.size()),
+		.maxSets = uint32_t(vk_swapchain_images.size()) + 16, // запас под текстуры ImGui
 		.poolSizeCount = sizeof(descriptor_pool_sizes) / sizeof(descriptor_pool_sizes[0]),
 		.pPoolSizes = descriptor_pool_sizes,
 	};
@@ -389,12 +390,24 @@ Context context;
 bool initialize(GLFWwindow* const window) {
 	vkb::InstanceBuilder ib;
 
-	auto ibr = ib.require_api_version(VK_MAKE_VERSION(1, 1, 0))
-				 .request_validation_layers()
+#ifdef GRAPHICS_ENABLE_DYNAMIC_RENDERING
+	// ЛР №4: динамический рендеринг входит в ядро Vulkan начиная с версии 1.3
+	ib.require_api_version(VK_MAKE_VERSION(1, 3, 0));
+#else
+	ib.require_api_version(VK_MAKE_VERSION(1, 1, 0));
+#endif
+
+	auto ibr = ib.request_validation_layers()
+				 .use_default_debug_messenger()
 				 .build();
+	if (!ibr) {
+		std::cerr << ibr.error().message() << '\n';
+		return false;
+	}
 
 	auto vkb_instance = ibr.value();
 	vk_instance = vkb_instance.instance;
+	vk_debug_messenger = vkb_instance.debug_messenger;
 	vk_api_version = vkb_instance.api_version;
 
 	if (glfwCreateWindowSurface(vk_instance, window, nullptr, &vk_surface) != VK_SUCCESS) {
@@ -406,9 +419,18 @@ bool initialize(GLFWwindow* const window) {
 
 	vkb::PhysicalDeviceSelector pds(vkb_instance, vk_surface);
 
-	auto pds_result = pds.prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
-						 .require_present()
-						 .select();
+	pds.prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
+	   .require_present();
+
+#ifdef GRAPHICS_ENABLE_DYNAMIC_RENDERING
+	VkPhysicalDeviceVulkan13Features features_13 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+		.dynamicRendering = VK_TRUE,
+	};
+	pds.set_required_features_13(features_13);
+#endif
+
+	auto pds_result = pds.select();
 	if (!pds_result) {
 		std::cerr << pds_result.error().message() << '\n';
 		return false;
@@ -705,6 +727,7 @@ void shutdown() {
 	vkDestroyDevice(context.device, nullptr);
 
 	vkDestroySurfaceKHR(vk_instance, vk_surface, nullptr);
+	vkb::destroy_debug_utils_messenger(vk_instance, vk_debug_messenger);
 	vkDestroyInstance(vk_instance, nullptr);
 }
 
@@ -786,7 +809,7 @@ void submitAndPresent() {
 	    result == VK_SUBOPTIMAL_KHR ||
 	    vk_swapchain_resize_require) {
 		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
-	} else {
+	} else if (result != VK_SUCCESS) {
 		std::cerr << "Failed to present Vulkan swapchain image\n";
 	}
 }
